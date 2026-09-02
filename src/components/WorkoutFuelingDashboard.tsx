@@ -1,240 +1,266 @@
 'use client';
 
-import React, { useState } from 'react';
-import { calculateFuelingRequirements, VdotZone } from '@/lib/vdotEngine';
-
-interface ProductOption {
-  category: 'raw_powder' | 'commercial_gel' | 'candy' | 'whole_food';
-  name: string;
-  servingDesc: string;
-  carbsGrams: number;
-  costPerServing: number;
-  upfrontCost: number;
-  totalServings: number;
-  link?: string;
-}
+import React, { useState, useEffect } from 'react';
+import ScienceDrawer from '@/components/ScienceDrawer';
+import { fetchProductsByTiming, updateUserProfile, logWorkoutSession } from '@/lib/supabaseQueries';
+import { calculateVdotFueling } from '@/lib/vdotEngine';
+import { supabase } from '@/lib/supabaseClient';
 
 export default function WorkoutFuelingDashboard() {
-  // User & Session Inputs
+  // UI & Drawer State
+  const [isScienceOpen, setIsScienceOpen] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isLoadingProducts, setIsLoadingProducts] = useState<boolean>(true);
+
+  // Runner Inputs & Workout Controls
   const [bodyMassKg, setBodyMassKg] = useState<number>(70);
+  const [vdot, setVdot] = useState<number>(52);
+  const [sessionType, setSessionType] = useState<string>('Long Run');
   const [durationMinutes, setDurationMinutes] = useState<number>(90);
-  const [intensityZone, setIntensityZone] = useState<VdotZone>('T');
-  const [sessionType, setSessionType] = useState<string>('Threshold / Long Intervals');
+  const [intensityZone, setIntensityZone] = useState<string>('Marathon Pace');
 
-  // Compute Targets using the Engine
-  const fueling = calculateFuelingRequirements(durationMinutes, intensityZone, bodyMassKg);
+  // Supabase Data State
+  const [products, setProducts] = useState<any[]>([]);
 
-  // Mock product catalog mapped to calculated targets
-  const getProductOptions = (carbsNeeded: number): ProductOption[] => [
-    {
-      category: 'raw_powder',
-      name: 'DIY Maltodextrin + Fructose + Sodium Citrate',
-      servingDesc: `${carbsNeeded}g Carbs (1:0.8 Ratio) + 500mg Sodium`,
-      carbsGrams: carbsNeeded,
-      costPerServing: Number(((carbsNeeded / 60) * 1.07).toFixed(2)),
-      upfrontCost: 75.0,
-      totalServings: 70,
-      link: 'https://www.bulksupplements.com',
-    },
-    {
-      category: 'commercial_gel',
-      name: 'Maurten Drink Mix 320 / SiS Beta Fuel',
-      servingDesc: '1 Sachet (80g Carbs)',
-      carbsGrams: 80,
-      costPerServing: 3.0,
-      upfrontCost: 42.0,
-      totalServings: 14,
-      link: 'https://www.maurten.com',
-    },
-    {
-      category: 'candy',
-      name: 'Swedish Fish',
-      servingDesc: `${Math.round((carbsNeeded / 31) * 5)} pieces (~${carbsNeeded}g Carbs)`,
-      carbsGrams: carbsNeeded,
-      costPerServing: 0.9,
-      upfrontCost: 4.5,
-      totalServings: 5,
-      link: 'https://www.snackworks.com',
-    },
-  ];
+  // Citation tags passed to the research drawer
+  const activeTags = ['dual_carbs', 'electrolytes', 'sodium_bicarb'];
 
-  const totalIntraCarbs = (fueling.intraWorkout.carbsPerHrGrams * (durationMinutes / 60));
-  const productOptions = getProductOptions(totalIntraCarbs);
+  // 1. Fetch live fuel products from Supabase on load
+  useEffect(() => {
+    async function loadProducts() {
+      try {
+        setIsLoadingProducts(true);
+        const dbProducts = await fetchProductsByTiming('intra_workout');
+        if (dbProducts) {
+          setProducts(dbProducts);
+        }
+      } catch (error) {
+        console.error('Error loading products from database:', error);
+      } finally {
+        setIsLoadingProducts(false);
+      }
+    }
+    loadProducts();
+  }, []);
+
+  // 2. Dynamic Fueling Target Calculations (Integrated with VDOT Engine)
+  const calculateTargets = () => {
+    // If vdotEngine provides calculateVdotFueling, use it directly
+    if (typeof calculateVdotFueling === 'function') {
+      return calculateVdotFueling({
+        vdot,
+        intensityZone,
+        durationMinutes,
+        bodyMassKg,
+      });
+    }
+
+    // Fallback calculation using VDOT intensity multipliers
+    const hours = durationMinutes / 60;
+    let zoneMultiplier = 1.0;
+    if (intensityZone === 'Threshold Pace') zoneMultiplier = 1.15;
+    if (intensityZone === 'Interval Pace') zoneMultiplier = 1.25;
+
+    let baseCarbRate = 30;
+    if (durationMinutes > 60 && durationMinutes <= 120) baseCarbRate = 60;
+    if (durationMinutes > 120) baseCarbRate = 90;
+
+    const carbRate = Math.round(baseCarbRate * (vdot / 50) * zoneMultiplier);
+
+    return {
+      carbRate,
+      totalCarbs: Math.round(carbRate * hours),
+      fluidMl: Math.round(500 * hours * (bodyMassKg / 70)),
+      sodiumMg: Math.round(600 * hours),
+    };
+  };
+
+  const targets = calculateTargets();
+
+  // 3. Save Workout Session with Dynamic Supabase User Auth
+  const handleSaveSession = async () => {
+    setIsSaving(true);
+    try {
+      // Get current authenticated user
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id;
+
+      if (!userId) {
+        alert('Please log in to save your workout session.');
+        return;
+      }
+
+      await updateUserProfile(userId, bodyMassKg, vdot);
+      await logWorkoutSession({
+        user_id: userId,
+        session_name: sessionType,
+        duration_minutes: durationMinutes,
+        intensity_zone: intensityZone,
+        session_type: sessionType,
+        is_periodized_block: false,
+      });
+
+      alert('Workout session & profile saved successfully!');
+    } catch (error) {
+      console.error('Save error:', error);
+      alert('Failed to save workout session.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-8 bg-slate-950 text-slate-100 min-h-screen">
-      {/* Session Configuration Bar */}
-      <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
-        <h2 className="text-xl font-bold text-emerald-400 mb-4">Workout Session Setup</h2>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
+      <div className="max-w-5xl mx-auto space-y-6">
+        
+        {/* Navigation & Header */}
+        <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-6 border-b border-slate-800">
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase mb-1">Body Mass (kg)</label>
+            <h1 className="text-2xl font-bold text-white tracking-tight">
+              VDOT Fueling Dashboard
+            </h1>
+            <p className="text-sm text-slate-400">
+              Personalized race & training fueling calculator
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setIsScienceOpen(true)}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-400 text-xs font-semibold rounded-lg border border-slate-700 transition"
+            >
+              🔬 View Supporting Evidence
+            </button>
+
+            <button
+              onClick={handleSaveSession}
+              disabled={isSaving}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white text-xs font-bold rounded-lg transition"
+            >
+              {isSaving ? 'Saving...' : '💾 Save Session'}
+            </button>
+          </div>
+        </header>
+
+        {/* Input Controls */}
+        <section className="grid grid-cols-1 md:grid-cols-4 gap-4 p-5 bg-slate-900 rounded-xl border border-slate-800">
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Body Mass (kg)</label>
             <input
               type="number"
               value={bodyMassKg}
               onChange={(e) => setBodyMassKg(Number(e.target.value))}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white"
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-md text-white text-sm focus:outline-none focus:border-emerald-500"
             />
           </div>
+
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase mb-1">Duration (Mins)</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">VDOT Score</label>
+            <input
+              type="number"
+              value={vdot}
+              onChange={(e) => setVdot(Number(e.target.value))}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-md text-white text-sm focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Duration (min)</label>
             <input
               type="number"
               value={durationMinutes}
               onChange={(e) => setDurationMinutes(Number(e.target.value))}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white"
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-md text-white text-sm focus:outline-none focus:border-emerald-500"
             />
           </div>
+
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase mb-1">VDOT Intensity Zone</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Intensity Zone</label>
             <select
               value={intensityZone}
-              onChange={(e) => setIntensityZone(e.target.value as VdotZone)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white"
+              onChange={(e) => setIntensityZone(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-md text-white text-sm focus:outline-none focus:border-emerald-500"
             >
-              <option value="E">Easy / Recovery (E)</option>
-              <option value="M">Marathon Pace (M)</option>
-              <option value="T">Threshold Pace (T)</option>
-              <option value="I">Intervals / VO2 Max (I)</option>
-              <option value="R">Repetition / Sprints (R)</option>
+              <option value="Easy Pace">Easy Pace (E)</option>
+              <option value="Marathon Pace">Marathon Pace (M)</option>
+              <option value="Threshold Pace">Threshold Pace (T)</option>
+              <option value="Interval Pace">Interval Pace (I)</option>
             </select>
           </div>
-          <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase mb-1">Session Type</label>
-            <input
-              type="text"
-              value={sessionType}
-              onChange={(e) => setSessionType(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white"
-            />
-          </div>
-        </div>
-      </div>
+        </section>
 
-      {/* Primary Fueling Output Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Pre-Workout Strategy */}
-        <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">Pre-Workout</span>
-          <h3 className="text-2xl font-extrabold mt-1">{fueling.preWorkout.carbsGrams}g Carbs</h3>
-          <p className="text-xs text-slate-400 mt-1">Consume ~{fueling.preWorkout.timingWindowMins} mins before session</p>
-          <div className="mt-4 space-y-2">
-            <span className="text-xs text-slate-500 font-semibold uppercase">Recommended Options:</span>
-            {fueling.preWorkout.recommendedFoods.map((food, i) => (
-              <div key={i} className="text-sm bg-slate-800/60 p-2 rounded border border-slate-700/50">
-                {food}
-              </div>
-            ))}
+        {/* Dynamic VDOT Targets */}
+        <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl">
+            <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">Target Intake</span>
+            <div className="text-3xl font-extrabold text-white mt-2">{targets.carbRate} g/hr</div>
+            <p className="text-xs text-slate-400 mt-1">Total Carbs: {targets.totalCarbs}g</p>
           </div>
-        </div>
 
-        {/* Intra-Workout Hydration & Electrolytes */}
-        <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider">Intra-Workout Hourly Rates</span>
-          <h3 className="text-2xl font-extrabold mt-1">{fueling.intraWorkout.carbsPerHrGrams}g Carbs / hr</h3>
-          <p className="text-xs text-slate-400 mt-1">Ratio: {fueling.intraWorkout.carbRatio}</p>
-          
-          <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-            <div className="bg-slate-800/60 p-2 rounded border border-slate-700/50">
-              <span className="text-slate-400 block">Fluid Rate</span>
-              <strong className="text-sm">{fueling.intraWorkout.fluidPerHrMl} mL/hr</strong>
-            </div>
-            <div className="bg-slate-800/60 p-2 rounded border border-slate-700/50">
-              <span className="text-slate-400 block">Sodium (Na+)</span>
-              <strong className="text-sm">{fueling.intraWorkout.sodiumPerHrMg} mg/hr</strong>
-            </div>
-            <div className="bg-slate-800/60 p-2 rounded border border-slate-700/50">
-              <span className="text-slate-400 block">Potassium (K+)</span>
-              <strong className="text-sm">{fueling.intraWorkout.potassiumPerHrMg} mg/hr</strong>
-            </div>
-            <div className="bg-slate-800/60 p-2 rounded border border-slate-700/50">
-              <span className="text-slate-400 block">Magnesium (Mg++)</span>
-              <strong className="text-sm">{fueling.intraWorkout.magnesiumPerHrMg} mg/hr</strong>
-            </div>
+          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl">
+            <span className="text-xs font-semibold text-sky-400 uppercase tracking-wider">Hydration</span>
+            <div className="text-3xl font-extrabold text-white mt-2">{targets.fluidMl} ml</div>
+            <p className="text-xs text-slate-400 mt-1">Total fluid target</p>
           </div>
-        </div>
 
-        {/* Post-Workout Recovery */}
-        <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Post-Workout Recovery</span>
-          <h3 className="text-2xl font-extrabold mt-1">{fueling.postWorkout.proteinGrams}g Protein</h3>
-          <p className="text-xs text-slate-400 mt-1">Paired with {fueling.postWorkout.carbsGrams}g Carbs (~3g Leucine)</p>
-          <div className="mt-4 bg-slate-800/60 p-3 rounded border border-slate-700/50 text-xs space-y-1">
-            <p className="text-slate-300"><strong>Fluid Goal:</strong> Rehydrate {fueling.postWorkout.fluidReplacementPct}% of total sweat loss within 4 hours.</p>
-            <p className="text-slate-400">Include whole foods like Greek yogurt, banana, or high-leucine whey isolates.</p>
+          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl">
+            <span className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Electrolytes</span>
+            <div className="text-3xl font-extrabold text-white mt-2">{targets.sodiumMg} mg</div>
+            <p className="text-xs text-slate-400 mt-1">Sodium intake target</p>
           </div>
-        </div>
-      </div>
+        </section>
 
-      {/* Ergogenic Supplement Stacking */}
-      {fueling.ergogenicSupplements.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
-          <h3 className="text-lg font-bold text-purple-400 mb-3">Ergogenic Supplement Protocol</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {fueling.ergogenicSupplements.map((supp, i) => (
-              <div key={i} className="bg-slate-800/80 p-4 rounded-xl border border-slate-700">
-                <div className="flex justify-between items-center mb-1">
-                  <strong className="text-white font-semibold">{supp.name}</strong>
-                  <span className="text-xs bg-purple-950 text-purple-300 px-2 py-0.5 rounded border border-purple-800">{supp.dosage}</span>
-                </div>
-                <p className="text-xs text-slate-400">{supp.timing}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Intra-Workout Fueling Option Comparison */}
-      {totalIntraCarbs > 0 && (
-        <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+        {/* Cost-Optimized Products List */}
+        <section className="p-5 bg-slate-900 border border-slate-800 rounded-xl">
           <div className="flex justify-between items-center mb-4">
-            <div>
-              <h3 className="text-lg font-bold text-white">Intra-Workout Fuel Options</h3>
-              <p className="text-xs text-slate-400">Targeting {totalIntraCarbs}g total carbohydrates for this session</p>
+            <h2 className="text-lg font-bold text-white">Cost-Optimized Fueling Comparisons</h2>
+            <span className="text-xs text-slate-400">Sorted by cost efficiency</span>
+          </div>
+          
+          {isLoadingProducts ? (
+            <p className="text-xs text-slate-400">Loading products from database...</p>
+          ) : products.length === 0 ? (
+            <p className="text-xs text-slate-500">No intra-workout products found.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {products.map((product) => {
+                const price = product.price_usd || product.price || 0;
+                const carbs = product.carbs_per_serving || 1;
+                const costPerGram = price > 0 ? (price / carbs).toFixed(2) : 'N/A';
+
+                return (
+                  <div key={product.id || product.name} className="p-4 bg-slate-950 border border-slate-800 rounded-lg space-y-2">
+                    <div className="flex justify-between items-start">
+                      <h3 className="font-semibold text-slate-200 text-sm">{product.name}</h3>
+                      {price > 0 && (
+                        <span className="text-xs px-2 py-0.5 bg-slate-800 text-emerald-400 border border-slate-700 rounded-full font-mono">
+                          ${price.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-400 space-y-1">
+                      <p>Carbohydrates: <span className="text-emerald-400 font-medium">{product.carbs_per_serving ?? 0}g</span></p>
+                      <p>Sodium: <span className="text-sky-400 font-medium">{product.sodium_mg ?? 0}mg</span></p>
+                      <div className="pt-2 mt-2 border-t border-slate-900 flex justify-between items-center text-xs">
+                        <span className="text-slate-500">Cost Efficiency:</span>
+                        <span className="text-emerald-400 font-semibold font-mono">${costPerGram} / g carb</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          </div>
+          )}
+        </section>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {productOptions.map((opt, i) => (
-              <div key={i} className="bg-slate-800/50 border border-slate-700/60 rounded-xl p-4 flex flex-col justify-between">
-                <div>
-                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
-                    opt.category === 'raw_powder' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                    opt.category === 'commercial_gel' ? 'bg-blue-950 text-blue-400 border border-blue-800' :
-                    'bg-amber-950 text-amber-400 border border-amber-800'
-                  }`}>
-                    {opt.category.replace('_', ' ')}
-                  </span>
-                  <h4 className="font-bold text-white mt-2 text-base">{opt.name}</h4>
-                  <p className="text-xs text-slate-400 mt-1">{opt.servingDesc}</p>
-                </div>
+      </div>
 
-                <div className="mt-6 pt-3 border-t border-slate-700/50 flex justify-between items-end">
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">Cost Per Session</span>
-                    <strong className="text-xl font-black text-white">${opt.costPerServing.toFixed(2)}</strong>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-[10px] text-slate-500 uppercase block">Upfront Outlay</span>
-                    <span className="text-xs font-semibold text-slate-300">${opt.upfrontCost.toFixed(2)} ({opt.totalServings} serv)</span>
-                  </div>
-                </div>
-
-                {opt.link && (
-                  <a
-                    href={opt.link}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-4 block text-center py-2 bg-slate-700 hover:bg-slate-600 text-xs font-bold rounded text-slate-200 transition"
-                  >
-                    View Product
-                  </a>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Slide-over Science Drawer */}
+      <ScienceDrawer
+        isOpen={isScienceOpen}
+        onClose={() => setIsScienceOpen(false)}
+        activeTags={activeTags}
+      />
     </div>
   );
 }
