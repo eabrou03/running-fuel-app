@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import ScienceDrawer from '@/components/ScienceDrawer';
 import { fetchProductsByTiming, updateUserProfile, logWorkoutSession } from '@/lib/supabaseQueries';
-import { calculateVdotFueling } from '@/lib/vdotEngine';
+import { calculateFuelingRequirements } from '@/lib/vdotEngine';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function WorkoutFuelingDashboard() {
@@ -25,7 +25,7 @@ export default function WorkoutFuelingDashboard() {
   // Citation tags passed to the research drawer
   const activeTags = ['dual_carbs', 'electrolytes', 'sodium_bicarb'];
 
-  // 1. Fetch live fuel products from Supabase on load
+  // 1. Fetch live fuel products from Supabase on component load
   useEffect(() => {
     async function loadProducts() {
       try {
@@ -43,19 +43,23 @@ export default function WorkoutFuelingDashboard() {
     loadProducts();
   }, []);
 
-  // 2. Dynamic Fueling Target Calculations (Integrated with VDOT Engine)
+  // 2. Dynamic Fueling Target Calculations using vdotEngine
   const calculateTargets = () => {
-    // If vdotEngine provides calculateVdotFueling, use it directly
-    if (typeof calculateVdotFueling === 'function') {
-      return calculateVdotFueling({
-        vdot,
-        intensityZone,
-        durationMinutes,
-        bodyMassKg,
-      });
+    if (typeof calculateFuelingRequirements === 'function') {
+      try {
+        const res = calculateFuelingRequirements({
+          vdot,
+          intensityZone,
+          durationMinutes,
+          bodyMassKg,
+        });
+        if (res) return res;
+      } catch (error) {
+        console.error('Error calculating VDOT fueling requirements:', error);
+      }
     }
 
-    // Fallback calculation using VDOT intensity multipliers
+    // Fallback calculation if vdotEngine returns undefined
     const hours = durationMinutes / 60;
     let zoneMultiplier = 1.0;
     if (intensityZone === 'Threshold Pace') zoneMultiplier = 1.15;
@@ -81,7 +85,6 @@ export default function WorkoutFuelingDashboard() {
   const handleSaveSession = async () => {
     setIsSaving(true);
     try {
-      // Get current authenticated user
       const { data: { user } } = await supabase.auth.getUser();
       const userId = user?.id;
 
