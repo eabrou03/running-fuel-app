@@ -45,22 +45,40 @@ export default function WorkoutFuelingDashboard() {
 
   // 2. Dynamic Fueling Target Calculations using vdotEngine
   const calculateTargets = () => {
+    const hours = durationMinutes / 60;
+
     if (typeof calculateFuelingRequirements === 'function') {
       try {
-        const res = calculateFuelingRequirements({
+        // Cast intensityZone as any to align with VdotZone parameter requirement
+        const res = calculateFuelingRequirements(
           vdot,
-          intensityZone,
+          intensityZone as any,
           durationMinutes,
-          bodyMassKg,
-        });
-        if (res) return res;
+          bodyMassKg
+        );
+        if (res) {
+          const targetData = res as any;
+          const carbRate = Number(
+            targetData.carbRate ?? targetData.carbsPerHour ?? targetData.carb_rate ?? targetData.carbs_per_hour ?? 60
+          );
+          const totalCarbs = Number(
+            targetData.totalCarbs ?? targetData.total_carbs ?? Math.round(carbRate * hours)
+          );
+          const fluidMl = Number(
+            targetData.fluidMl ?? targetData.fluid_ml ?? targetData.fluidMlPerHour ?? Math.round(500 * hours)
+          );
+          const sodiumMg = Number(
+            targetData.sodiumMg ?? targetData.sodium_mg ?? targetData.sodiumMgPerHour ?? Math.round(600 * hours)
+          );
+
+          return { carbRate, totalCarbs, fluidMl, sodiumMg };
+        }
       } catch (error) {
         console.error('Error calculating VDOT fueling requirements:', error);
       }
     }
 
-    // Fallback calculation if vdotEngine returns undefined
-    const hours = durationMinutes / 60;
+    // Fallback calculation if vdotEngine is unavailable
     let zoneMultiplier = 1.0;
     if (intensityZone === 'Threshold Pace') zoneMultiplier = 1.15;
     if (intensityZone === 'Interval Pace') zoneMultiplier = 1.25;
